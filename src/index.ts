@@ -291,6 +291,53 @@ app.post('/stamp', async (req: Request, res: Response) => {
   res.status(200).json({ message, newStatus });
 });
 
+// Discord Notification Logic
+async function sendDiscordDailyReport(userId: string) {
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    const channelId = process.env.DISCORD_NOTIFY_CHANNEL_ID;
+
+    if (!botToken || !channelId) {
+        console.warn('Discord notification not configured. Skipping.');
+        return;
+    }
+
+    try {
+        const now = new Date();
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            include: { attendanceLogs: { orderBy: { timestamp: 'asc' } } }
+        });
+
+        if (!user) return;
+
+        const dailyTotals = calculateLogsDuration(user.attendanceLogs, resetHour);
+        const logicalDate = getLogicalDate(now, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+        
+        let todayMs = dailyTotals[dateKey] || 0;
+
+        // Note: clock_out happens AFTER the log is added in this implementation, 
+        // so todayMs already includes the session that just ended.
+        // If status was working just before, it's now unregistered.
+
+        const hours = Math.floor(todayMs / (1000 * 60 * 60));
+        const minutes = Math.floor((todayMs / (1000 * 60)) % 60);
+        const messageContent = `📊 **自動日報**\n**${user.username}** さんが作業を終了しました。\n本日の合計作業時間: **${hours}時間 ${minutes}分**`;
+
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${botToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ content: messageContent }),
+        });
+        console.log(`Notification sent for user ${userId}`);
+    } catch (e) {
+        console.error('Failed to send automatic notification:', e);
+    }
+}
+
 app.post('/clock_out', async (req: Request, res: Response) => {
   const userId = getUserId(req);
   if (!userId) {
@@ -315,6 +362,10 @@ app.post('/clock_out', async (req: Request, res: Response) => {
     await prisma.attendanceLog.create({
         data: { userId, type: 'work_end', timestamp: now }
     });
+    
+    // 自動送信
+    sendDiscordDailyReport(userId);
+
     res.status(200).json({ message: '退勤しました。', newStatus: 'unregistered' });
   } else {
     res.status(400).json({ message: 'まだ出勤していません。' });
@@ -360,6 +411,213 @@ app.get('/status', async (req: Request, res: Response) => {
             ? user.attendanceLogs[user.attendanceLogs.length - 1].timestamp.toISOString() 
             : null
     });
+});
+
+// Helper to format duration
+function calculateLogsDuration(logs: any[], resetHour: number): { [date: string]: number } {
+    const dailyTotals: { [date: string]: number } = {};
+
+    let lastStartTime: number | null = null;
+
+    // ログは古い順 (asc) であることを前提とする
+    for (const log of logs) {
+        const time = new Date(log.timestamp).getTime();
+        const dateObj = new Date(log.timestamp);
+        
+        // Calculate logical date string (YYYY-MM-DD)
+        const logicalDate = getLogicalDate(dateObj, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+
+        if (!dailyTotals[dateKey]) dailyTotals[dateKey] = 0;
+
+        if (log.type === 'work_start' || log.type === 'break_end') {
+            if (lastStartTime === null) {
+                lastStartTime = time;
+            }
+        } else if (log.type === 'work_end' || log.type === 'break_start') {
+            if (lastStartTime !== null) {
+                // 開始時刻が属する日の合計に加算する（簡易ロジック）
+                // ※厳密には日付を跨ぐ場合分割すべきだが、今回は開始日ベースとする
+                const startLogDate = new Date(lastStartTime);
+                const startLogicalDate = getLogicalDate(startLogDate, resetHour);
+                const startDateKey = startLogicalDate.toISOString().split('T')[0];
+                
+                if (!dailyTotals[startDateKey]) dailyTotals[startDateKey] = 0;
+                
+                dailyTotals[startDateKey] += (time - lastStartTime);
+                lastStartTime = null;
+            }
+        }
+    }
+    
+    // 現在進行中の作業時間はここには含めない（確定したログのみ計算）
+    return dailyTotals;
+}
+
+app.get('/summary', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) {
+        res.status(400).json({ message: 'User ID is required' });
+        return;
+    }
+
+    try {
+        // Retrieve all logs for the user, sorted by timestamp ASC
+        const logs = await prisma.attendanceLog.findMany({
+            where: { userId: userId },
+            orderBy: { timestamp: 'asc' }
+        });
+
+        const dailyTotals = calculateLogsDuration(logs, resetHour);
+        
+        // --- Aggregation ---
+        const summary = {
+            daily: [] as { date: string; totalMs: number }[],
+            weekly: [] as { weekStart: string; totalMs: number }[],
+            monthly: [] as { month: string; totalMs: number }[],
+            total: 0
+        };
+
+        // 1. Daily Summary
+        summary.daily = Object.entries(dailyTotals)
+            .map(([date, totalMs]) => ({ date, totalMs }))
+            .sort((a, b) => b.date.localeCompare(a.date)); // Newest first
+
+        // 2. Weekly Summary (ISO Week: Monday start)
+        const weeklyMap: { [weekStart: string]: number } = {};
+        // 3. Monthly Summary
+        const monthlyMap: { [month: string]: number } = {};
+
+        Object.entries(dailyTotals).forEach(([dateStr, ms]) => {
+            summary.total += ms;
+
+            const date = new Date(dateStr);
+            
+            // Monthly (YYYY-MM)
+            const monthKey = dateStr.substring(0, 7);
+            if (!monthlyMap[monthKey]) monthlyMap[monthKey] = 0;
+            monthlyMap[monthKey] += ms;
+
+            // Weekly (Find Monday of the week)
+            const day = date.getDay();
+            const diff = date.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+            const monday = new Date(date.setDate(diff));
+            const weekKey = monday.toISOString().split('T')[0];
+            
+            if (!weeklyMap[weekKey]) weeklyMap[weekKey] = 0;
+            weeklyMap[weekKey] += ms;
+        });
+
+        summary.weekly = Object.entries(weeklyMap)
+            .map(([weekStart, totalMs]) => ({ weekStart, totalMs }))
+            .sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+
+        summary.monthly = Object.entries(monthlyMap)
+            .map(([month, totalMs]) => ({ month, totalMs }))
+            .sort((a, b) => b.month.localeCompare(a.month));
+
+        res.json(summary);
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to calculate summary' });
+    }
+});
+
+// Discord Notification
+app.post('/notify', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) {
+        res.status(400).json({ message: 'User ID is required' });
+        return;
+    }
+
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    const channelId = process.env.DISCORD_NOTIFY_CHANNEL_ID;
+
+    if (!botToken || !channelId) {
+        res.status(500).json({ message: 'Discord notification not configured on server.' });
+        return;
+    }
+
+    try {
+        const now = new Date();
+        await checkAndResetStateIfNewDay(userId, now, resetHour);
+
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            include: { attendanceLogs: { orderBy: { timestamp: 'asc' } } }
+        });
+
+        if (!user) {
+            res.status(404).json({ message: 'User not found' });
+            return;
+        }
+
+        // Calculate today's work time using logic similar to calculateLogsDuration but strictly for "Today"
+        // Reuse the logic: get daily totals
+        const dailyTotals = calculateLogsDuration(user.attendanceLogs, resetHour);
+        
+        // Get today's logical date
+        const logicalDate = getLogicalDate(now, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+        
+        let todayMs = dailyTotals[dateKey] || 0;
+
+        // Add current session if working
+        if (user.status === 'working') {
+            // Find last start time
+            let lastStartTime = null;
+            // Iterate backwards to find the last work_start or break_end that hasn't been closed
+            // Since we don't have that state easily available without re-parsing, 
+            // let's just re-parse specifically for the current open session.
+            // Simplified: If status is working, the last log MUST be a start type.
+            const lastLog = user.attendanceLogs[user.attendanceLogs.length - 1];
+            if (lastLog) {
+                const startTime = new Date(lastLog.timestamp).getTime();
+                // If the session started before today's reset hour, we clamp it to reset hour
+                const todayResetTime = new Date(logicalDate);
+                todayResetTime.setHours(resetHour, 0, 0, 0);
+                
+                const effectiveStart = Math.max(startTime, todayResetTime.getTime());
+                const effectiveEnd = now.getTime();
+                
+                if (effectiveEnd > effectiveStart) {
+                    todayMs += (effectiveEnd - effectiveStart);
+                }
+            }
+        }
+
+        // Format Message
+        const hours = Math.floor(todayMs / (1000 * 60 * 60));
+        const minutes = Math.floor((todayMs / (1000 * 60)) % 60);
+        
+        const messageContent = `📊 **日報**\n**${user.username}** さんの本日の作業時間: **${hours}時間 ${minutes}分**`;
+
+        // Send to Discord
+        const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${botToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                content: messageContent,
+            }),
+        });
+
+        if (!discordRes.ok) {
+            const err = await discordRes.json();
+            console.error('Discord API Error:', err);
+            throw new Error('Failed to send message to Discord');
+        }
+
+        res.json({ message: 'Notification sent!' });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to send notification' });
+    }
 });
 
 app.listen(port, listenHost, () => {
