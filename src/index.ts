@@ -9,11 +9,6 @@ const port = parseInt(process.env.PORT || '9393', 10);
 const host = process.env.HOST || '0.0.0.0';
 const resetHour = parseInt(process.env.RESET_HOUR || '5', 10); // 日替わり時刻を午前5時に設定
 
-// Discord OAuth Config
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI || `http://localhost:${port}/auth/discord/callback`;
-
 app.use(cors());
 app.use(express.json());
 
@@ -43,10 +38,6 @@ const defaultState: AppState = {
   currentUserStatus: 'unregistered',
   attendanceLog: [],
 };
-
-// 認証フロー用のメモリ内ストア (本番環境ではRedisやDB推奨)
-// requestState -> { status: 'pending' | 'completed', userData?: DiscordUser }
-const authRequests = new Map<string, { status: 'pending' | 'complete', user?: DiscordUser }>();
 
 // データを読み込む関数
 function readData(): AppState {
@@ -128,135 +119,6 @@ function resetStateIfNewDay(state: AppState, currentTimestamp: Date, resetHour: 
 }
 
 // === API エンドポイント ===
-
-// 1. 認証開始: フロントエンドはここを呼んで redirectUrl を取得するか、
-//    あるいは直接ブラウザでこのURLを開く。
-//    今回はポーリング方式にするため、フロントエンドで state (uuid) を生成して
-//    パラメータとして渡してもらうか、ここで生成して返す。
-//    簡単のため、フロントエンドから state を受け取る形、または
-//    バックエンドが生成してリダイレクトする形をとる。
-//    Tauri (localhost) -> Browser (Discord) -> Backend (Callback) -> Tauri (Poll)
-
-app.get('/auth/discord/login-url', (req: Request, res: Response) => {
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    res.status(500).json({ error: 'Discord credentials not configured' });
-    return;
-  }
-  
-  // 簡易的なUUID生成
-  const state = crypto.randomUUID();
-  authRequests.set(state, { status: 'pending' });
-
-  const url = `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=identify&state=${state}`;
-
-  res.json({ url, state });
-});
-
-app.get('/auth/discord/callback', async (req: Request, res: Response) => {
-  const { code, state } = req.query;
-
-  if (!state || typeof state !== 'string' || !authRequests.has(state)) {
-    res.status(400).send('Invalid state');
-    return;
-  }
-
-  if (!code || typeof code !== 'string') {
-    res.status(400).send('No code provided');
-    return;
-  }
-
-  try {
-    // 1. Access Token 取得
-    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
-      method: 'POST',
-      body: new URLSearchParams({
-        client_id: CLIENT_ID!,
-        client_secret: CLIENT_SECRET!,
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: REDIRECT_URI,
-      }),
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    });
-
-    if (!tokenResponse.ok) {
-      throw new Error('Failed to fetch token');
-    }
-
-    const tokenData = await tokenResponse.json();
-
-    // 2. User Info 取得
-    const userResponse = await fetch('https://discord.com/api/users/@me', {
-      headers: {
-        authorization: `${tokenData.token_type} ${tokenData.access_token}`,
-      },
-    });
-
-    if (!userResponse.ok) {
-      throw new Error('Failed to fetch user');
-    }
-
-    const userData = await userResponse.json();
-
-    // 3. メモリに保存
-    authRequests.set(state, { 
-      status: 'complete', 
-      user: {
-        id: userData.id,
-        username: userData.username,
-        avatar: userData.avatar,
-      } 
-    });
-
-    // 4. データファイルにもユーザー情報を永続化する（シングルユーザー想定）
-    let currentState = readData();
-    currentState.discordUser = {
-        id: userData.id,
-        username: userData.username,
-        avatar: userData.avatar,
-    };
-    writeData(currentState);
-
-    res.send('<h1>Authentication successful!</h1><p>You can close this window and return to the app.</p><script>setTimeout(() => window.close(), 2000);</script>');
-
-  } catch (error) {
-    console.error('Auth error:', error);
-    res.status(500).send('Authentication failed');
-  }
-});
-
-// ポーリング用
-app.get('/auth/poll', (req: Request, res: Response) => {
-  const { state } = req.query;
-  if (!state || typeof state !== 'string') {
-    res.status(400).json({ error: 'Missing state' });
-    return;
-  }
-
-  const reqData = authRequests.get(state);
-  if (!reqData) {
-    res.status(404).json({ error: 'Request not found' });
-    return;
-  }
-
-  if (reqData.status === 'complete' && reqData.user) {
-    // 認証完了したらマップから削除（一度きり）
-    authRequests.delete(state);
-    res.json({ status: 'complete', user: reqData.user });
-  } else {
-    res.json({ status: 'pending' });
-  }
-});
-
-app.post('/auth/logout', (req: Request, res: Response) => {
-    let state = readData();
-    state.discordUser = undefined;
-    writeData(state);
-    res.json({ message: 'Logged out' });
-});
-
 app.post('/stamp', (req: Request, res: Response) => {
   const now = new Date();
   let state = readData(); // データを読み込む
