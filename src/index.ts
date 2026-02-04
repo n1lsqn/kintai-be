@@ -24,10 +24,13 @@ console.log(`------------------------------`);
 
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const REDIRECT_URI = `http://${publicHost}:${port}/auth/discord/callback`;
+const REDIRECT_URI = `http://${publicHost}/auth/discord/callback`;
 
 // Prisma Client Initialization
 const prisma = new PrismaClient();
+
+// In-memory store for login states (state -> userId)
+const loginStates = new Map<string, string>();
 
 console.log(`*** IMPORTANT ***`);
 console.log(`Discord Redirect URI: ${REDIRECT_URI}`);
@@ -114,8 +117,13 @@ app.get('/auth/discord', (req: Request, res: Response) => {
         res.status(500).json({ error: 'Discord credentials not configured on server.' });
         return;
     }
+    const { state } = req.query;
+    if (!state) {
+        res.status(400).json({ error: 'State is required' });
+        return;
+    }
+
     const scope = 'identify';
-    const state = 'random_state_string'; // Simplified for this prototype
     const authUrl = `https://discord.com/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=${scope}&state=${state}`;
     
     // Return the URL for the frontend to open
@@ -182,6 +190,13 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
             }
         });
 
+        // Store the successful login for this specific state
+        if (state) {
+            loginStates.set(state.toString(), userData.id);
+            // Automatically clean up state after 5 minutes
+            setTimeout(() => loginStates.delete(state.toString()), 5 * 60 * 1000);
+        }
+
         // 簡易的にHTMLでユーザーIDをフロントエンドに渡す仕組み
         // 実際にはJWTなどをCookieにセットするか、カスタムプロトコルスキームを使うのが良い
         // 今回はlocalStorageに保存させるためのスクリプトを埋め込む
@@ -214,17 +229,26 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
     }
 });
 
-// 暫定API: 最後にログイン（更新）されたユーザーを返す
-// フロントエンドが自分のIDを知るためのエンドポイント
-app.get('/auth/me/latest', async (req: Request, res: Response) => {
+// ログイン結果確認API: stateに紐づくユーザー情報を返す
+app.get('/auth/me/:state', async (req: Request, res: Response) => {
+    const { state } = req.params;
+    const userId = loginStates.get(state);
+    
+    if (!userId) {
+        res.status(404).json({ message: 'Login not found or expired' });
+        return;
+    }
+
     try {
-        const user = await prisma.user.findFirst({
-            orderBy: { updatedAt: 'desc' }
+        const user = await prisma.user.findUnique({
+            where: { id: userId }
         });
         if (user) {
+            // Once retrieved, we can delete the state
+            loginStates.delete(state);
             res.json(user);
         } else {
-            res.status(404).json({ message: 'No users found' });
+            res.status(404).json({ message: 'User not found' });
         }
     } catch (e) {
         console.error(e);
