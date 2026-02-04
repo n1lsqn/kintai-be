@@ -1,0 +1,21 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kintai-api
+    ports:
+      - "9394:9393"
+    environment:
+      - PORT=9393
+      - NODE_ENV=development
+    volumes:
+      # be/ 直下で実行するためパスを修正
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+      - kintai_data:/usr/src/app/data
+    command: npm run dev
+    restart: unless-stopped
+
+volumes:
+  kintai_data:

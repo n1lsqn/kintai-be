@@ -1,0 +1,19 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kintai-api-prod
+    ports:
+      - "9393:9393"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=9393
+    volumes:
+      - kintai_data_prod:/app/data
+    restart: always
+
+volumes:
+  kintai_data_prod:
