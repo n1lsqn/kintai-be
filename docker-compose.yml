@@ -13,9 +13,6 @@ services:
       # be/ 直下で実行するためパスを修正
       - .:/usr/src/app
       - /usr/src/app/node_modules
-      - kintai_data:/usr/src/app/data
+      - ./data:/usr/src/app/data
     command: npm run dev
     restart: unless-stopped
-
-volumes:
-  kintai_data:

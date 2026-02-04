@@ -12,8 +12,5 @@ services:
       - NODE_ENV=production
       - PORT=9393
     volumes:
-      - kintai_data_prod:/app/data
+      - ./data:/app/data
     restart: always
-
-volumes:
-  kintai_data_prod:
