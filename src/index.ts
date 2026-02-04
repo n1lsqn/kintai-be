@@ -362,6 +362,117 @@ app.get('/status', async (req: Request, res: Response) => {
     });
 });
 
+// Helper to format duration
+function calculateLogsDuration(logs: any[], resetHour: number): { [date: string]: number } {
+    const dailyTotals: { [date: string]: number } = {};
+
+    let lastStartTime: number | null = null;
+
+    // ログは古い順 (asc) であることを前提とする
+    for (const log of logs) {
+        const time = new Date(log.timestamp).getTime();
+        const dateObj = new Date(log.timestamp);
+        
+        // Calculate logical date string (YYYY-MM-DD)
+        const logicalDate = getLogicalDate(dateObj, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+
+        if (!dailyTotals[dateKey]) dailyTotals[dateKey] = 0;
+
+        if (log.type === 'work_start' || log.type === 'break_end') {
+            if (lastStartTime === null) {
+                lastStartTime = time;
+            }
+        } else if (log.type === 'work_end' || log.type === 'break_start') {
+            if (lastStartTime !== null) {
+                // 開始時刻が属する日の合計に加算する（簡易ロジック）
+                // ※厳密には日付を跨ぐ場合分割すべきだが、今回は開始日ベースとする
+                const startLogDate = new Date(lastStartTime);
+                const startLogicalDate = getLogicalDate(startLogDate, resetHour);
+                const startDateKey = startLogicalDate.toISOString().split('T')[0];
+                
+                if (!dailyTotals[startDateKey]) dailyTotals[startDateKey] = 0;
+                
+                dailyTotals[startDateKey] += (time - lastStartTime);
+                lastStartTime = null;
+            }
+        }
+    }
+    
+    // 現在進行中の作業時間はここには含めない（確定したログのみ計算）
+    return dailyTotals;
+}
+
+app.get('/summary', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) {
+        res.status(400).json({ message: 'User ID is required' });
+        return;
+    }
+
+    try {
+        // Retrieve all logs for the user, sorted by timestamp ASC
+        const logs = await prisma.attendanceLog.findMany({
+            where: { userId: userId },
+            orderBy: { timestamp: 'asc' }
+        });
+
+        const dailyTotals = calculateLogsDuration(logs, resetHour);
+        
+        // --- Aggregation ---
+        const summary = {
+            daily: [] as { date: string; totalMs: number }[],
+            weekly: [] as { weekStart: string; totalMs: number }[],
+            monthly: [] as { month: string; totalMs: number }[],
+            total: 0
+        };
+
+        // 1. Daily Summary
+        summary.daily = Object.entries(dailyTotals)
+            .map(([date, totalMs]) => ({ date, totalMs }))
+            .sort((a, b) => b.date.localeCompare(a.date)); // Newest first
+
+        // 2. Weekly Summary (ISO Week: Monday start)
+        const weeklyMap: { [weekStart: string]: number } = {};
+        // 3. Monthly Summary
+        const monthlyMap: { [month: string]: number } = {};
+
+        Object.entries(dailyTotals).forEach(([dateStr, ms]) => {
+            summary.total += ms;
+
+            const date = new Date(dateStr);
+            
+            // Monthly (YYYY-MM)
+            const monthKey = dateStr.substring(0, 7);
+            if (!monthlyMap[monthKey]) monthlyMap[monthKey] = 0;
+            monthlyMap[monthKey] += ms;
+
+            // Weekly (Find Monday of the week)
+            const day = date.getDay();
+            const diff = date.getDate() - day + (day === 0 ? -6 : 1); // adjust when day is sunday
+            const monday = new Date(date.setDate(diff));
+            const weekKey = monday.toISOString().split('T')[0];
+            
+            if (!weeklyMap[weekKey]) weeklyMap[weekKey] = 0;
+            weeklyMap[weekKey] += ms;
+        });
+
+        summary.weekly = Object.entries(weeklyMap)
+            .map(([weekStart, totalMs]) => ({ weekStart, totalMs }))
+            .sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+
+        summary.monthly = Object.entries(monthlyMap)
+            .map(([month, totalMs]) => ({ month, totalMs }))
+            .sort((a, b) => b.month.localeCompare(a.month));
+
+        res.json(summary);
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to calculate summary' });
+    }
+});
+
 app.listen(port, listenHost, () => {
   console.log(`Server is running at http://${listenHost}:${port}`);
 });
