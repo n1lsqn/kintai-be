@@ -13,7 +13,6 @@ dotenv.config({
 
 const app = express();
 const port = parseInt(process.env.PORT || '9393', 10);
-const host = process.env.HOST || '0.0.0.0'; // Public host name (e.g. localhost)
 const listenHost = '0.0.0.0'; // Always listen on all interfaces in Docker
 const publicHost = process.env.PUBLIC_HOST || 'localhost'; // Public facing host for redirects
 const resetHour = parseInt(process.env.RESET_HOUR || '5', 10); // 日替わり時刻を午前5時に設定
@@ -146,7 +145,14 @@ app.get('/auth/discord/callback', async (req: Request, res: Response) => {
             }),
         });
 
-        const tokenData: any = await tokenResponse.json();
+        interface TokenResponse {
+            access_token: string;
+            token_type: string;
+            expires_in: number;
+            refresh_token: string;
+            scope: string;
+        }
+        const tokenData = await tokenResponse.json() as TokenResponse;
         if (!tokenResponse.ok) {
             console.error('Token Error:', tokenData);
             throw new Error('Failed to get token');
@@ -221,6 +227,7 @@ app.get('/auth/me/latest', async (req: Request, res: Response) => {
             res.status(404).json({ message: 'No users found' });
         }
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: 'Database error' });
     }
 });
