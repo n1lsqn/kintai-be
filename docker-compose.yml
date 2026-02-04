@@ -11,10 +11,29 @@ services:
       # ここでは.env.developmentを優先させるために削除、または明示的に開発用ポートを指定
       - PORT=9394 
       - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/kintai?schema=public
     volumes:
       # be/ 直下で実行するためパスを修正
       - .:/usr/src/app
       - /usr/src/app/node_modules
       - ./data:/usr/src/app/data
-    command: npm run dev
+    command: sh -c "npx prisma generate && npx prisma migrate deploy && npm run dev"
+    depends_on:
+      - db
     restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    container_name: kintai-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: kintai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
