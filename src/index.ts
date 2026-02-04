@@ -291,6 +291,53 @@ app.post('/stamp', async (req: Request, res: Response) => {
   res.status(200).json({ message, newStatus });
 });
 
+// Discord Notification Logic
+async function sendDiscordDailyReport(userId: string) {
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    const channelId = process.env.DISCORD_NOTIFY_CHANNEL_ID;
+
+    if (!botToken || !channelId) {
+        console.warn('Discord notification not configured. Skipping.');
+        return;
+    }
+
+    try {
+        const now = new Date();
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            include: { attendanceLogs: { orderBy: { timestamp: 'asc' } } }
+        });
+
+        if (!user) return;
+
+        const dailyTotals = calculateLogsDuration(user.attendanceLogs, resetHour);
+        const logicalDate = getLogicalDate(now, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+        
+        let todayMs = dailyTotals[dateKey] || 0;
+
+        // Note: clock_out happens AFTER the log is added in this implementation, 
+        // so todayMs already includes the session that just ended.
+        // If status was working just before, it's now unregistered.
+
+        const hours = Math.floor(todayMs / (1000 * 60 * 60));
+        const minutes = Math.floor((todayMs / (1000 * 60)) % 60);
+        const messageContent = `📊 **自動日報**\n**${user.username}** さんが作業を終了しました。\n本日の合計作業時間: **${hours}時間 ${minutes}分**`;
+
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${botToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ content: messageContent }),
+        });
+        console.log(`Notification sent for user ${userId}`);
+    } catch (e) {
+        console.error('Failed to send automatic notification:', e);
+    }
+}
+
 app.post('/clock_out', async (req: Request, res: Response) => {
   const userId = getUserId(req);
   if (!userId) {
@@ -315,6 +362,10 @@ app.post('/clock_out', async (req: Request, res: Response) => {
     await prisma.attendanceLog.create({
         data: { userId, type: 'work_end', timestamp: now }
     });
+    
+    // 自動送信
+    sendDiscordDailyReport(userId);
+
     res.status(200).json({ message: '退勤しました。', newStatus: 'unregistered' });
   } else {
     res.status(400).json({ message: 'まだ出勤していません。' });
@@ -470,6 +521,102 @@ app.get('/summary', async (req: Request, res: Response) => {
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: 'Failed to calculate summary' });
+    }
+});
+
+// Discord Notification
+app.post('/notify', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) {
+        res.status(400).json({ message: 'User ID is required' });
+        return;
+    }
+
+    const botToken = process.env.DISCORD_BOT_TOKEN;
+    const channelId = process.env.DISCORD_NOTIFY_CHANNEL_ID;
+
+    if (!botToken || !channelId) {
+        res.status(500).json({ message: 'Discord notification not configured on server.' });
+        return;
+    }
+
+    try {
+        const now = new Date();
+        await checkAndResetStateIfNewDay(userId, now, resetHour);
+
+        const user = await prisma.user.findUnique({
+            where: { id: userId },
+            include: { attendanceLogs: { orderBy: { timestamp: 'asc' } } }
+        });
+
+        if (!user) {
+            res.status(404).json({ message: 'User not found' });
+            return;
+        }
+
+        // Calculate today's work time using logic similar to calculateLogsDuration but strictly for "Today"
+        // Reuse the logic: get daily totals
+        const dailyTotals = calculateLogsDuration(user.attendanceLogs, resetHour);
+        
+        // Get today's logical date
+        const logicalDate = getLogicalDate(now, resetHour);
+        const dateKey = logicalDate.toISOString().split('T')[0];
+        
+        let todayMs = dailyTotals[dateKey] || 0;
+
+        // Add current session if working
+        if (user.status === 'working') {
+            // Find last start time
+            let lastStartTime = null;
+            // Iterate backwards to find the last work_start or break_end that hasn't been closed
+            // Since we don't have that state easily available without re-parsing, 
+            // let's just re-parse specifically for the current open session.
+            // Simplified: If status is working, the last log MUST be a start type.
+            const lastLog = user.attendanceLogs[user.attendanceLogs.length - 1];
+            if (lastLog) {
+                const startTime = new Date(lastLog.timestamp).getTime();
+                // If the session started before today's reset hour, we clamp it to reset hour
+                const todayResetTime = new Date(logicalDate);
+                todayResetTime.setHours(resetHour, 0, 0, 0);
+                
+                const effectiveStart = Math.max(startTime, todayResetTime.getTime());
+                const effectiveEnd = now.getTime();
+                
+                if (effectiveEnd > effectiveStart) {
+                    todayMs += (effectiveEnd - effectiveStart);
+                }
+            }
+        }
+
+        // Format Message
+        const hours = Math.floor(todayMs / (1000 * 60 * 60));
+        const minutes = Math.floor((todayMs / (1000 * 60)) % 60);
+        
+        const messageContent = `📊 **日報**\n**${user.username}** さんの本日の作業時間: **${hours}時間 ${minutes}分**`;
+
+        // Send to Discord
+        const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bot ${botToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                content: messageContent,
+            }),
+        });
+
+        if (!discordRes.ok) {
+            const err = await discordRes.json();
+            console.error('Discord API Error:', err);
+            throw new Error('Failed to send message to Discord');
+        }
+
+        res.json({ message: 'Notification sent!' });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to send notification' });
     }
 });
 
