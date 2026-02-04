@@ -1,0 +1,55 @@
+name: Backend CI
+
+on:
+  push:
+    paths:
+      - 'be/**'
+  pull_request:
+    paths:
+      - 'be/**'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./be
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: kintai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: be/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check (Build)
+        run: npm run build
+
+      - name: Run Prisma Migration (Test DB)
+        env:
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/kintai_test?schema=public
+        run: npx prisma migrate deploy

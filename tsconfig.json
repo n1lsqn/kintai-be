@@ -9,5 +9,10 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "moduleResolution": "node"
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "prisma",
+    "prisma.config.ts"
+  ]
 }
