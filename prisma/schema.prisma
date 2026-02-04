@@ -1,0 +1,31 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id // Discord ID
+  username      String
+  avatar        String?
+  status        String   @default("unregistered") // unregistered, working, on_break
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  attendanceLogs AttendanceLog[]
+}
+
+model AttendanceLog {
+  id        Int      @id @default(autoincrement())
+  type      String   // work_start, work_end, break_start, break_end
+  timestamp DateTime
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+}

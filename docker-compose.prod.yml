@@ -7,10 +7,33 @@ services:
     ports:
       - "9393:9393"
     env_file:
-      - .env
+      - .env.production
     environment:
       - NODE_ENV=production
       - PORT=9393
-    volumes:
-      - ./data:/app/data
+    # 本番ではソースコードのマウントはしない（イメージ内のコードを使用）
+    # Prismaのマイグレーションを実行してからサーバー起動
+    command: sh -c "npx prisma migrate deploy && npm start"
+    depends_on:
+      - db
     restart: always
+
+  db:
+    image: postgres:15-alpine
+    container_name: kintai-db-prod
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: kintai
+    # 本番DBのポートはホストに公開しない（APIからのみアクセス）
+    # 必要なら公開するが、セキュリティ上閉じておくのが一般的。
+    # ただし開発機で本番モードを試すなら衝突回避も含めて公開しない、もしくは別ポートにする。
+    # ここでは内部通信のみにする。
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    restart: always
+
+volumes:
+  postgres_data_prod:
