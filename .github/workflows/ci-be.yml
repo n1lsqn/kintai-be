@@ -3,17 +3,17 @@ name: Backend CI
 on:
   push:
     paths:
-      - 'be/**'
+      - '**'
   pull_request:
     paths:
-      - 'be/**'
+      - '**'
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./be
+        working-directory: ./
 
     services:
       postgres:
@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: be/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
